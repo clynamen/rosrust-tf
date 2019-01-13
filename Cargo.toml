@@ -1,0 +1,12 @@
+[package]
+name = "rosrust-tf"
+version = "0.1.0"
+authors = ["clynamen <clynamen@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+rosrust = "0.7.1"
+rosrust_codegen = "0.7.0"
+nalgebra = "0.16.13"
+approx = "*"
+
