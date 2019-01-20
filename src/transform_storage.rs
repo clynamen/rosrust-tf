@@ -9,6 +9,7 @@ pub type NQuaternion = UnitQuaternion<f64>;
 pub type FrameId = u32; 
 pub type Stamp = Duration;
 
+#[derive(Debug)]
 pub struct TransformStorage {
     pub frame_id       : FrameId,
     pub child_frame_id : FrameId,
