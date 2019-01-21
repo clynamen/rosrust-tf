@@ -1,11 +1,20 @@
 use super::transform_storage::{FrameId, TransformStorage, ToSecDouble, Stamp,
                                NVector3, NTranslation3, NQuaternion};
+use super::interpolation::interpolate_two_transform;
 use approx;
+
 
 use std::collections::VecDeque;
 
 pub trait TimeCacheInterface {
-    fn getData(stamp: Stamp) -> Result<TransformStorage, TfError>;
+    fn get_data(&self, stamp: &Stamp) -> Result<TransformStorage, TfError>;
+    fn get_parent(&self, stamp: &Stamp) -> Result<FrameId, TfError>;
+    fn insert_data(&mut self, new_ts: TransformStorage) -> bool;
+    fn clear(&mut self);
+    fn get_latest_time_and_parent(&self) -> Option<(Stamp, FrameId)>;
+    fn get_length(&self) -> usize;
+    fn get_latest_timestamp(&self) -> Option<Stamp>;
+    fn get_oldest_timestamp(&self) -> Option<Stamp>;
 }
 
 pub struct TimeCache {
@@ -15,9 +24,11 @@ pub struct TimeCache {
 #[derive(Debug)]
 pub enum TfError {
     Generic(&'static str),
+    TransformNotFound,
     ExtrapolationError1,
     ExtrapolationError2,
     ExtrapolationError3,
+    NoParent
 }
 
 #[derive(Debug)]
@@ -32,8 +43,58 @@ use TfError::*;
 
 impl TimeCacheInterface for TimeCache {
 
-    fn getData(stamp: Stamp) -> Result<TransformStorage, TfError> {
-        Err(TfError::Generic(""))
+    fn get_data(&self, stamp: &Stamp) -> Result<TransformStorage, TfError> {
+        let closest_res = self.find_closest(stamp)?;
+        match(closest_res) {
+            NoClose => {
+                Err(TransformNotFound)
+            },
+            OneClose(ts) => {
+                Ok(ts.clone())
+            },
+            TwoClose(left_ts, right_ts) => {
+                Ok(interpolate_two_transform(left_ts, right_ts, stamp))
+            }
+        }
+    }
+
+    fn get_parent(&self, stamp: &Stamp) -> Result<FrameId, TfError> 
+    {
+        let closest_res = self.find_closest(stamp)?;
+        match(closest_res) {
+            TwoClose(left_ts, right_ts) => {
+                Ok(left_ts.frame_id)
+            }
+            _ => {
+                Err(NoParent)
+            }
+        }
+    }
+
+    fn insert_data(&mut self, new_ts: TransformStorage) -> bool {
+        self.insert_ordered_by_time(new_ts);
+        true
+    }
+
+    fn clear(&mut self) {
+        self.transforms_ordered.clear();
+    }
+
+    fn get_latest_time_and_parent(&self) -> Option<(Stamp, FrameId)> {
+        let latest_ts = self.transforms_ordered.front()?;
+        Some((latest_ts.stamp.clone(), latest_ts.frame_id))
+    }
+
+    fn get_length(&self) -> usize {
+        self.transforms_ordered.len()
+    }
+
+    fn get_latest_timestamp(&self) -> Option<Stamp> {
+        Some(self.transforms_ordered.front()?.stamp.clone())
+    }
+
+    fn get_oldest_timestamp(&self) -> Option<Stamp> {
+        Some(self.transforms_ordered.back()?.stamp.clone())
     }
 
 }
@@ -61,13 +122,13 @@ impl TimeCache {
     }
 
     pub fn find_closest(&self, req_time: &Stamp) -> Result<FindClosestResult, TfError>{
-        if(self.len() > 0) {
-            if(*req_time == Stamp::from_nanos(0)) {
+        if self.len() > 0 {
+            if *req_time == Stamp::from_nanos(0) {
                 let latest = self.transforms_ordered.front().unwrap();
                 Ok(OneClose(latest))
-            } else if (self.len() == 1) {
+            } else if self.len() == 1 {
                 let latest = self.transforms_ordered.front().unwrap();
-                if(*req_time == latest.stamp) {
+                if *req_time == latest.stamp {
                     Ok(OneClose(latest))
                 } else {
                     Err(ExtrapolationError1)
@@ -77,13 +138,13 @@ impl TimeCache {
                 let latest_tran   = self.transforms_ordered.front().unwrap();
                 let earliest_stamp = &earliest_tran.stamp;
                 let latest_stamp = &latest_tran.stamp;
-                if(*req_time == *earliest_stamp) {
+                if *req_time == *earliest_stamp {
                     Ok(OneClose(earliest_tran))
-                } else if (*req_time == *latest_stamp) {
+                } else if *req_time == *latest_stamp {
                     Ok(OneClose(latest_tran))
-                } else if(*req_time < *earliest_stamp) {
+                } else if *req_time < *earliest_stamp {
                     Err(ExtrapolationError2)
-                } else if(*req_time > *latest_stamp) {
+                } else if *req_time > *latest_stamp {
                     Err(ExtrapolationError3)
                 } else {
                    let left_index = self.transforms_ordered.iter().filter(|x| *req_time > x.stamp).count() - 1;
@@ -299,6 +360,42 @@ mod tests {
                 assert!(false)
             }
         }
+        
+    }
+
+    #[test]
+    fn get_data_closest_between() {
+        let mut time_cache = TimeCache::new();
+        time_cache.insert_ordered_by_time(make_transform_storage_with_stamp(Stamp::from_nanos(100)));    
+        time_cache.insert_ordered_by_time(make_transform_storage_with_stamp(Stamp::from_nanos(400)));    
+
+        let ts_a = TransformStorage {
+            frame_id       : 1u32, 
+            child_frame_id : 2u32, 
+            translation    : NTranslation3::new(1.0, 10.0, 100.0),  
+            rotation       : NQuaternion::new(NVector3::z()), 
+            stamp          : Stamp::from_nanos(200)
+        };
+        
+        let ts_b = TransformStorage {
+            frame_id       : 1u32, 
+            child_frame_id : 2u32, 
+            translation    : NTranslation3::new(2.0, 9.0, 100.0),  
+            rotation       : NQuaternion::new(NVector3::z()), 
+            stamp          : Stamp::from_nanos(300)
+        };
+        time_cache.insert_ordered_by_time(ts_a);
+        time_cache.insert_ordered_by_time(ts_b);
+
+        let res = time_cache.get_data(&Stamp::from_nanos(220));
+        assert!(res.is_ok());
+        let ts = res.unwrap();
+
+        assert_eq!(Stamp::from_nanos(220), ts.stamp);
+        assert!(abs_diff_eq!(1.2,   ts.translation.vector.x));
+        assert!(abs_diff_eq!(9.8,   ts.translation.vector.y));
+        assert!(abs_diff_eq!(100.0, ts.translation.vector.z));
+
         
     }
 
